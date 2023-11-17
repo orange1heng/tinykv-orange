@@ -562,10 +562,10 @@ func TestProposal2AB(t *testing.T) {
 }
 
 // TestHandleMessageType_MsgAppend ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMessageType_MsgAppend2AB(t *testing.T) {
 	tests := []struct {
 		m       pb.Message
@@ -1544,6 +1544,7 @@ func TestSplitVote2AA(t *testing.T) {
 	}
 }
 
+// 创建配置有特定日志条目的Raft实例
 func entsWithConfig(configFunc func(*Config), id uint64, terms ...uint64) *Raft {
 	storage := NewMemoryStorage()
 	for i, term := range terms {
@@ -1576,12 +1577,12 @@ func votedWithConfig(configFunc func(*Config), id, vote, term uint64) *Raft {
 type network struct {
 	peers   map[uint64]stateMachine
 	storage map[uint64]*MemoryStorage
-	dropm   map[connem]float64
-	ignorem map[pb.MessageType]bool
+	dropm   map[connem]float64      // 模拟网络不稳定情况，其中connem是一个结构体或类型，代表了网络连接的一端。映射的值代表消息丢失的概率。
+	ignorem map[pb.MessageType]bool // 用于指定是否忽略某种类型的消息
 
 	// msgHook is called for each message sent. It may inspect the
 	// message and return true to send it or false to drop it.
-	msgHook func(pb.Message) bool
+	msgHook func(pb.Message) bool // 钩子函数，它在每条消息发送时被调用。函数可以检查消息内容，并根据其返回值决定是发送还是丢弃该消息。
 }
 
 // newNetwork initializes a network from peers.
@@ -1701,6 +1702,7 @@ type blackHole struct{}
 func (blackHole) Step(pb.Message) error      { return nil }
 func (blackHole) readMessages() []pb.Message { return nil }
 
+// 不执行任何操作的节点
 var nopStepper = &blackHole{}
 
 func idsBySize(size int) []uint64 {
