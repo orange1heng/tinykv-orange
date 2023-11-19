@@ -265,22 +265,33 @@ func (bs *Raftstore) startWorkers(peers []*peer) {
 	ctx := bs.ctx
 	workers := bs.workers
 	router := bs.router
+	// 1.开启raftWorker
+	//  storeWorker（与存储管理相关的任务，可能包括数据的持久化操作、处理与存储系统相关的维护任务（如压缩、清理等））
 	bs.wg.Add(2) // raftWorker, storeWorker
 	rw := newRaftWorker(ctx, router)
 	go rw.run(bs.closeCh, bs.wg)
+
 	sw := newStoreWorker(ctx, bs.storeState)
 	go sw.run(bs.closeCh, bs.wg)
+
+	// 开启storeWorker工作
 	router.sendStore(message.Msg{Type: message.MsgTypeStoreStart, Data: ctx.store})
+
+	// 为每个peer发送启动消息
 	for i := 0; i < len(peers); i++ {
 		regionID := peers[i].regionId
 		_ = router.send(regionID, message.Msg{RegionID: regionID, Type: message.MsgTypeStart})
 	}
 	engines := ctx.engine
 	cfg := ctx.cfg
+
+	// 2. 开启四个异步worker
 	workers.splitCheckWorker.Start(runner.NewSplitCheckHandler(engines.Kv, NewRaftstoreRouter(router), cfg))
 	workers.regionWorker.Start(runner.NewRegionTaskHandler(engines, ctx.snapMgr))
 	workers.raftLogGCWorker.Start(runner.NewRaftLogGCTaskHandler())
 	workers.schedulerWorker.Start(runner.NewSchedulerTaskHandler(ctx.store.Id, ctx.schedulerClient, NewRaftstoreRouter(router)))
+
+	// 3.时钟驱动worker，启动周期性任务
 	go bs.tickDriver.run()
 }
 

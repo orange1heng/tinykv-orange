@@ -179,22 +179,30 @@ func (rs *RaftStorage) Start() error {
 	if err != nil {
 		return err
 	}
+	// raftRouter：负责在 Raft 集群中的各个节点之间路由消息的组件，负责将消息发送到正确的节点上
+	// raftSystem：协调整个 Raft 协议的运行。这可能包括管理日志复制、维护集群状态、处理选举等
 	rs.raftRouter, rs.raftSystem = raftstore.CreateRaftstore(cfg)
 
+	// 2. 开启工作线程
 	rs.resolveWorker = worker.NewWorker("resolver", &rs.wg)
 	resolveSender := rs.resolveWorker.Sender()
 	resolveRunner := newResolverRunner(schedulerClient)
 	rs.resolveWorker.Start(resolveRunner)
 
+	// 3. 开启快照管理器
 	rs.snapManager = snap.NewSnapManager(filepath.Join(cfg.DBPath, "snap"))
 	rs.snapWorker = worker.NewWorker("snap-worker", &rs.wg)
 	snapSender := rs.snapWorker.Sender()
 	snapRunner := newSnapRunner(rs.snapManager, rs.config, rs.raftRouter)
 	rs.snapWorker.Start(snapRunner)
 
+	// 4. 初始化Raft客户端和传输层
+	// 主要负责与 Raft 集群内的其他节点进行通信。它可以发送请求（如附加日志条目、投票请求等）并接收来自其他节点的响应。
 	raftClient := newRaftClient(cfg)
+	// 在 Raft 实现中负责在节点之间传输消息，通常实现了消息的序列化和反序列化
 	trans := NewServerTransport(raftClient, snapSender, rs.raftRouter, resolveSender)
 
+	// 初始化TiKV节点并启动
 	rs.node = raftstore.NewNode(rs.raftSystem, rs.config, schedulerClient)
 	err = rs.node.Start(context.TODO(), rs.engines, trans, rs.snapManager)
 	if err != nil {

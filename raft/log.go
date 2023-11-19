@@ -77,9 +77,12 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
+
+	hardState, _, _ := storage.InitialState()
+
 	raftLog := &RaftLog{
 		storage:         storage,
-		committed:       firstIndex - 1,
+		committed:       hardState.Commit,
 		applied:         firstIndex - 1,
 		stabled:         lastIndex,
 		entries:         entries,
@@ -174,17 +177,18 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i == 0 { // dummy entry's index is 1.
 		return 0, nil
 	}
-
-	if i < l.dummyIndex {
-		return 0, ErrCompacted
-	}
-
 	if i > l.LastIndex() {
 		return 0, ErrUnavailable
 	}
-	// dummyIndex <= i <= l.LastIndex()
 
-	return l.entries[i-l.dummyIndex].Term, nil
+	if i >= l.dummyIndex {
+		// dummyIndex <= i <= l.LastIndex()
+		return l.entries[i-l.dummyIndex].Term, nil
+	}
+
+	term, err := l.storage.Term(i)
+	return term, err
+
 }
 
 func (l *RaftLog) toEntryIndex(i int) uint64 {
