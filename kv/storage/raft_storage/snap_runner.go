@@ -77,6 +77,7 @@ func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error
 		return errors.Errorf("missing snap file: %v", snap.Path())
 	}
 
+	// 建立gRPC连接
 	cc, err := grpc.Dial(addr, grpc.WithInsecure(),
 		grpc.WithInitialWindowSize(2*1024*1024),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -86,17 +87,21 @@ func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error
 	if err != nil {
 		return err
 	}
+	// 创建客户端和流
 	client := tinykvpb.NewTinyKvClient(cc)
 	stream, err := client.Snapshot(context.TODO())
 	if err != nil {
 		return err
 	}
+
+	// 发送Raft消息
 	err = stream.Send(&raft_serverpb.SnapshotChunk{Message: msg})
 	if err != nil {
 		return err
 	}
 
 	buf := make([]byte, snapChunkLen)
+	// 发送快照块
 	for remain := snap.TotalSize(); remain > 0; remain -= uint64(len(buf)) {
 		if remain < uint64(len(buf)) {
 			buf = buf[:remain]
@@ -110,6 +115,7 @@ func (r *snapRunner) sendSnap(addr string, msg *raft_serverpb.RaftMessage) error
 			return err
 		}
 	}
+	// 关闭流并接收响应
 	_, err = stream.CloseAndRecv()
 	if err != nil {
 		return err
@@ -128,6 +134,7 @@ func (r *snapRunner) recv(t *recvSnapTask) {
 }
 
 func (r *snapRunner) recvSnap(stream tinykvpb.TinyKv_SnapshotServer) (*raft_serverpb.RaftMessage, error) {
+	// 接收客户端发送的数据
 	head, err := stream.Recv()
 	if err != nil {
 		return nil, err
@@ -155,6 +162,7 @@ func (r *snapRunner) recvSnap(stream tinykvpb.TinyKv_SnapshotServer) (*raft_serv
 	defer r.snapManager.Deregister(snapKey, snap.SnapEntryReceiving)
 
 	for {
+		// 接收客户端发送的数据
 		chunk, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
@@ -177,6 +185,7 @@ func (r *snapRunner) recvSnap(stream tinykvpb.TinyKv_SnapshotServer) (*raft_serv
 		return nil, err
 	}
 
+	// 所有数据接收完成，发送响应
 	stream.SendAndClose(&raft_serverpb.Done{})
 	return head.GetMessage(), nil
 }

@@ -193,10 +193,11 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int, 1)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 3; i++ { // 整个测试会运行三次
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
+		// 启动多个客户端。每个客户端随机地执行Put或Scan操作
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
 			j := 0
 			defer func() {
@@ -204,14 +205,14 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}()
 			last := ""
 			for atomic.LoadInt32(&done_clients) == 0 {
-				if (rand.Int() % 1000) < 500 {
+				if (rand.Int() % 1000) < 500 { // 客户端生成键值对并将其存储到集群中
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
-				} else {
+				} else { // 客户端从集群中读取一系列键值对，并验证它们的正确性
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
@@ -224,12 +225,12 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}
 		})
 
-		if unreliable || partitions {
+		if unreliable || partitions { // 模拟网络不稳定或网络分区的情况
 			// Allow the clients to perform some operations without interruption
 			time.Sleep(300 * time.Millisecond)
 			go networkchaos(t, cluster, ch_partitioner, &done_partitioner, unreliable, partitions, electionTimeout)
 		}
-		if confchange {
+		if confchange { // 模拟集群配置的变更，如添加或移除节点
 			// Allow the clients to perfrom some operations without interruption
 			time.Sleep(100 * time.Millisecond)
 			go confchanger(t, cluster, ch_confchange, &done_confchanger)
@@ -240,6 +241,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		atomic.StoreInt32(&done_confchanger, 1) // tell confchanger to quit
 		if unreliable || partitions {
 			// log.Printf("wait for partitioner\n")
+			// 等待网络分区结束
 			<-ch_partitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
@@ -253,7 +255,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		// log.Printf("wait for clients\n")
 		<-ch_clients
 
-		if crash {
+		if crash { // 模拟集群中服务器的崩溃和重启
 			log.Warnf("shutdown servers\n")
 			for i := 1; i <= nservers; i++ {
 				cluster.StopServer(uint64(i))
@@ -287,7 +289,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}
 		}
 
-		if maxraftlog > 0 {
+		if maxraftlog > 0 { // 检查Raft日志的大小，确保它在预期的限制内
 			time.Sleep(1 * time.Second)
 
 			// Check maximum after the servers have processed all client
@@ -320,7 +322,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}
 		}
 
-		if split {
+		if split { // 检查数据是否被正确地分割到不同的区域
 			r := cluster.GetRegion([]byte(""))
 			if len(r.GetEndKey()) == 0 {
 				t.Fatalf("region is not split")

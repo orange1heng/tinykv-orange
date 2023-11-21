@@ -99,6 +99,17 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	newFirst, err := l.storage.FirstIndex()
+	if err != nil {
+		panic("This should not happen.")
+	}
+	if newFirst > l.dummyIndex {
+		//l.entries = l.entries[newFirst-l.dummyIndex:]
+		entries := l.entries[newFirst-l.dummyIndex:]
+		l.entries = make([]pb.Entry, 0)
+		l.entries = append(l.entries, entries...)
+		l.dummyIndex = newFirst
+	}
 }
 
 // allEntries return all the entries not compacted.
@@ -153,13 +164,7 @@ func (l *RaftLog) firstIndex() uint64 {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	var index uint64
-	if len(l.entries) > 0 { // 如果有未持久化的日志，返回未持久化日志的最后索引
-		return max(l.entries[len(l.entries)-1].Index, index)
-	}
-	// 否则返回持久化日志的最后索引
-	i, _ := l.storage.LastIndex()
-	return max(i, index)
+	return l.dummyIndex - 1 + uint64(len(l.entries))
 }
 
 func (l *RaftLog) LastTerm() uint64 {
@@ -186,6 +191,12 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return l.entries[i-l.dummyIndex].Term, nil
 	}
 
+	// 是否等于当前正准备安装的快照的最后一条日志
+	if !IsEmptySnap(l.pendingSnapshot) && i == l.pendingSnapshot.Metadata.Index {
+		return l.pendingSnapshot.Metadata.Term, nil
+	}
+
+	// 从持久存储中查找，如果有错误返回，那么只能是快照中的日志
 	term, err := l.storage.Term(i)
 	return term, err
 

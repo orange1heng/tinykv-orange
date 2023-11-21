@@ -268,4 +268,32 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	resp := pb.Message{MsgType: pb.MessageType_MsgAppendResponse, From: r.id, Term: r.Term}
+
+	meta := m.Snapshot.Metadata
+
+	if m.Term < r.Term {
+		resp.Reject = true
+	} else if r.RaftLog.committed >= meta.Index {
+		resp.Reject = true
+		resp.Index = r.RaftLog.committed
+	} else {
+		// install snapshot.
+		r.becomeFollower(m.Term, m.From)
+
+		r.RaftLog.dummyIndex = meta.Index + 1
+		r.RaftLog.committed = meta.Index
+		r.RaftLog.applied = meta.Index
+		r.RaftLog.stabled = meta.Index
+		r.RaftLog.pendingSnapshot = m.Snapshot
+		r.RaftLog.entries = make([]pb.Entry, 0)
+
+		r.Prs = make(map[uint64]*Progress)
+		for _, id := range meta.ConfState.Nodes {
+			r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+		}
+
+		resp.Index = meta.Index
+	}
+	r.msgs = append(r.msgs, resp)
 }

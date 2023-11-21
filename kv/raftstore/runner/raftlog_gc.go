@@ -80,11 +80,13 @@ func (r *raftLogGCTaskHandler) Handle(t worker.Task) {
 		return
 	}
 	log.Debugf("execute gc log. [regionId: %d, endIndex: %d]", logGcTask.RegionID, logGcTask.EndIdx)
+	// 执行实际的垃圾回收操作，清理Raft日志条目。
 	collected, err := r.gcRaftLog(logGcTask.RaftEngine, logGcTask.RegionID, logGcTask.StartIdx, logGcTask.EndIdx)
 	if err != nil {
 		log.Errorf("failed to gc. [regionId: %d, collected: %d, err: %v]", logGcTask.RegionID, collected, err)
 	} else {
 		log.Debugf("collected log entries. [regionId: %d, entryCount: %d]", logGcTask.RegionID, collected)
 	}
+	// 报告已GC的日志条目数，上层可以决定是否需要报告，如果需要报告就初始化一个 taskResCh 来接收报告的信息
 	r.reportCollected(collected)
 }

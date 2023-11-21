@@ -174,7 +174,8 @@ func newRaft(c *Config) *Raft {
 	// Your Code Here (2A).
 	IsEnableLog := os.Getenv("kv_debug")
 	if IsEnableLog != "false" {
-		log.SetLevel(log.LOG_LEVEL_DEBUG)
+		//log.SetLevel(log.LOG_LEVEL_DEBUG)
+		log.SetLevel(log.LOG_LEVEL_ERROR)
 	} else {
 		log.SetLevel(log.LOG_LEVEL_WARN)
 	}
@@ -263,7 +264,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	prevTerm, err := r.RaftLog.Term(r.Prs[to].Next - 1)
 	if err != nil {
-		log.Infof("get LogTerm failed. index: [%d]", r.Prs[to].Next-1)
+		r.sendSnapshot(to)
+		log.Infof("[Snapshot Request]%d to %d, prevLogIndex %v, dummyIndex %v", r.id, to, r.Prs[to].Next-1, r.RaftLog.dummyIndex)
 		return false
 	}
 	ents := r.RaftLog.getEntries(r.Prs[to].Next, 0)
@@ -273,6 +275,25 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 	r.msgs = append(r.msgs, m)
 	return true
+}
+
+// leader发送快照给别的节点
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		// 生成 Snapshot 的工作是由 region worker 异步执行的，如果 Snapshot 还没有准备好
+		// 此时会返回 ErrSnapshotTemporarilyUnavailable 错误，此时 leader 应该放弃本次 Snapshot Request
+		// 等待下一次再请求 storage 获取 snapshot（通常来说会在下一次 heartbeat response 的时候发送 snapshot）
+		return
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		To:       to,
+		From:     r.id,
+		Term:     r.Term,
+		Snapshot: &snapshot,
+	})
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -409,6 +430,8 @@ func (r *Raft) stepFollower(m pb.Message) {
 		r.handleRequestVote(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 }
 func (r *Raft) stepCandidate(m pb.Message) {
@@ -423,6 +446,8 @@ func (r *Raft) stepCandidate(m pb.Message) {
 		r.handleRequestVoteResponse(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 
 }

@@ -174,7 +174,7 @@ func (rn *RawNode) Ready() Ready {
 		// 此时 hardState 还没有持久化，先不修改prevHardSt
 	}
 
-	if rn.Raft.RaftLog.pendingSnapshot != nil {
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
 
@@ -192,9 +192,9 @@ func (rn *RawNode) HasReady() bool {
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
 		return true
 	}
-	//if r.RaftLog.hasPendingSnapshot() {
-	//	return true
-	//}
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		return true
+	}
 	if len(r.msgs) > 0 || len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 {
 		return true
 	}
@@ -222,8 +222,10 @@ func (rn *RawNode) Advance(rd Ready) {
 	}
 
 	if !IsEmptySnap(&rd.Snapshot) {
-		// todo: snapshot
+		rn.Raft.RaftLog.pendingSnapshot = nil
 	}
+
+	rn.Raft.RaftLog.maybeCompact()
 
 }
 

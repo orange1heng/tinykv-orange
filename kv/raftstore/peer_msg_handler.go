@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -51,23 +52,22 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	ready := d.RaftGroup.Ready()
 
-	// 1.保存需要持久化的日志、HardState、Snapshot
-	_, err := d.peerStorage.SaveReadyState(&ready)
+	// 1.保存需要持久化的日志、HardState(RaftLocalState)，应用Snapshot
+	applySnapResult, err := d.peerStorage.SaveReadyState(&ready)
 	if err != nil {
 		log.Panic(err)
 	}
-	// todo: snapshot
-	//if applySnapResult != nil {
-	//	if !reflect.DeepEqual(applySnapResult.PrevRegion, applySnapResult.Region) {
-	//		d.peerStorage.SetRegion(applySnapResult.Region)
-	//		storeMeta := d.ctx.storeMeta
-	//		storeMeta.Lock()
-	//		storeMeta.regions[applySnapResult.Region.Id] = applySnapResult.Region
-	//		storeMeta.regionRanges.Delete(&regionItem{applySnapResult.PrevRegion})
-	//		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{applySnapResult.Region})
-	//		storeMeta.Unlock()
-	//	}
-	//}
+
+	// 应用了快照数据之后，修改元数据
+	if applySnapResult != nil && !reflect.DeepEqual(applySnapResult.PrevRegion, applySnapResult.Region) {
+		d.peerStorage.SetRegion(applySnapResult.Region)
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		storeMeta.regions[applySnapResult.Region.Id] = applySnapResult.Region
+		storeMeta.regionRanges.Delete(&regionItem{applySnapResult.PrevRegion})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{applySnapResult.Region})
+		storeMeta.Unlock()
+	}
 
 	// 2.发送msg给其他peer
 	d.Send(d.ctx.trans, ready.Messages)
@@ -109,11 +109,32 @@ func (d *peerMsgHandler) processCommittedEntry(entry *pb.Entry, kvWB *engine_uti
 	}
 
 	if request.AdminRequest != nil {
-		//return d.processAdminRequest(entry, request, kvWB)
-		return nil
+		return d.processAdminRequest(entry, request, kvWB)
 	} else {
 		return d.processRequest(entry, request, kvWB)
 	}
+}
+
+// processAdminRequest 处理 commit 的 Admin Request 类型 command
+func (d *peerMsgHandler) processAdminRequest(entry *pb.Entry, requests *raft_cmdpb.RaftCmdRequest, kvWB *engine_util.WriteBatch) *engine_util.WriteBatch {
+	adminReq := requests.AdminRequest
+	switch adminReq.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		if adminReq.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+			truncatedState := d.peerStorage.applyState.TruncatedState
+			truncatedState.Index, truncatedState.Term = adminReq.CompactLog.CompactIndex, adminReq.CompactLog.CompactTerm
+			if err := kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState); err != nil {
+				log.Panic(err)
+			}
+			d.ScheduleCompactLog(adminReq.CompactLog.CompactIndex)
+		}
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	default:
+		log.Panic("invalid admin request: %v", adminReq.CmdType)
+	}
+	return kvWB
 }
 
 // processRequest 处理 commit 的 Put/Get/Delete/Snap 类型 command
@@ -278,7 +299,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
-// //将 client 的请求包装成 entry 传递给 raft 层
+// 将 client 的请求包装成 entry 传递给 raft 层
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -287,9 +308,22 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// Your Code Here (2B).
 	if msg.AdminRequest != nil {
-		//d.proposeAdminRequest(msg, cb)
+		d.proposeAdminRequest(msg, cb)
 	} else {
 		d.proposeRequest(msg, cb)
+	}
+}
+
+func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		data, err := msg.Marshal()
+		if err != nil {
+			log.Panic(err)
+		}
+		if err := d.RaftGroup.Propose(data); err != nil {
+			log.Panic(err)
+		}
 	}
 }
 
@@ -421,9 +455,9 @@ func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	return true
 }
 
-/// Checks if the message is sent to the correct peer.
-///
-/// Returns true means that the message can be dropped silently.
+// / Checks if the message is sent to the correct peer.
+// /
+// / Returns true means that the message can be dropped silently.
 func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	fromEpoch := msg.GetRegionEpoch()
 	isVoteMsg := util.IsVoteMessage(msg.Message)
@@ -622,7 +656,6 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 		// In case compact_idx == first_idx before subtraction.
 		return
 	}
-
 	term, err := d.RaftGroup.Raft.RaftLog.Term(compactIdx)
 	if err != nil {
 		log.Fatalf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)

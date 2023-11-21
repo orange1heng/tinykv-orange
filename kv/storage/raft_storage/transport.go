@@ -66,6 +66,7 @@ func (t *ServerTransport) Resolve(storeID uint64, msg *raft_serverpb.RaftMessage
 }
 
 func (t *ServerTransport) WriteData(storeID uint64, addr string, msg *raft_serverpb.RaftMessage) {
+	// 发现是Snapshot类型的消息，进行截获
 	if msg.GetMessage().GetSnapshot() != nil {
 		t.SendSnapshotSock(addr, msg)
 		return

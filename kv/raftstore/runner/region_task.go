@@ -171,6 +171,7 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 		return nil, err
 	}
 
+	// 在快照管理器中注册这个快照任务
 	key := snap.SnapKey{RegionID: regionId, Index: index, Term: term}
 	mgr.Register(key, snap.SnapEntryGenerating)
 	defer mgr.Deregister(key, snap.SnapEntryGenerating)
@@ -193,6 +194,7 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 			ConfState: &confState,
 		},
 	}
+	// 构建快照
 	s, err := mgr.GetSnapshotForBuilding(key)
 	if err != nil {
 		return nil, err
