@@ -152,7 +152,8 @@ type Raft struct {
 	// Follow the procedure defined in section 3.10 of Raft phd thesis.
 	// (https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)
 	// (Used in 3A leader transfer)
-	leadTransferee uint64
+	leadTransferee  uint64
+	transferElapsed int
 
 	// Only one conf change may be pending (in the log, but not yet
 	// applied) at a time. This is enforced via PendingConfIndex, which
@@ -161,6 +162,8 @@ type Raft struct {
 	// be proposed if the leader's applied index is greater than this
 	// value.
 	// (Used in 3A conf change)
+	// 任何时候，日志中只能有一个待处理（pending）的配置变更。
+	// 在一个配置变更日志 applied 之前，不能有其他的配置变更被加入到日志中。
 	PendingConfIndex uint64
 
 	randomElectionTimeout int
@@ -230,7 +233,19 @@ func newRaft(c *Config) *Raft {
 
 	r.resetRandomElectionTimeout()
 
+	r.PendingConfIndex = r.initPendingConfIndex()
 	return r
+}
+
+// initPendingConfIndex 初始化 pendingConfIndex
+// 查找 [appliedIndex + 1, lastIndex] 之间是否存在还没有 Apply 的 ConfChange Entry
+func (r *Raft) initPendingConfIndex() uint64 {
+	for i := r.RaftLog.applied + 1; i <= r.RaftLog.LastIndex(); i++ {
+		if r.RaftLog.entries[i-r.RaftLog.dummyIndex].EntryType == pb.EntryType_EntryConfChange {
+			return i
+		}
+	}
+	return None
 }
 
 func (r *Raft) resetRandomElectionTimeout() {
@@ -343,9 +358,17 @@ func (r *Raft) tickHeartbeat() {
 
 	if r.heartbeatTimeout >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
+		// MessageType_MsgBeat 属于内部消息，不需要经过 RawNode 处理
 		err := r.Step(pb.Message{MsgType: pb.MessageType_MsgBeat})
 		if err != nil {
 			panic(err)
+		}
+	}
+	if r.leadTransferee != None {
+		// 在一个选举周期后如果领导者转移还未完成，就中止流程，以便恢复客户端请求
+		r.transferElapsed++
+		if r.transferElapsed >= r.electionTimeout {
+			r.leadTransferee = None
 		}
 	}
 }
@@ -386,6 +409,9 @@ func (r *Raft) becomeLeader() {
 		r.Prs[id].Next = r.RaftLog.LastIndex() + 1
 		r.Prs[id].Match = 0
 	}
+
+	r.PendingConfIndex = r.initPendingConfIndex()
+
 	// 按理来说是广播心跳信息，但是如果广播心跳信息，如果follower日志落后，还是会发送Append消息让其同步日志，这样会浪费一轮心跳信息
 	// 所以这里广播Append信息，相当于带上了心跳信息
 	// 解决「当前任期内迟迟没有新日志到来，导致之前任期的日志一直无法被“间接”提交」问题
@@ -403,18 +429,21 @@ func (r *Raft) Step(m pb.Message) error {
 		// 心跳机制：MsgHeartbeat
 		// 日志复制：MsgAppend
 		// 领导人选举：MsgRequestVote
+		// 领导人转移：MsgTransferLeader(负责转发消息给leader), MsgHup(变为领导者)
 		r.stepFollower(m)
 	case StateCandidate:
 		// local msg: MsgHup(领导者选举)
 		// 心跳机制：MsgHeartbeat
 		// 日志复制：MsgAppend
 		// 领导人选举：MsgRequestVote, MsgRequestVoteResponse
+		// 领导人转移：MsgTransferLeader(负责转发消息给leader), MsgHup(变为领导者)
 		r.stepCandidate(m)
 	case StateLeader:
 		// MsgPropose
 		// 心跳机制：MsgHeartbeat, MsgHeartbeatResponse
 		// 日志复制：MsgAppend, MsgAppendResponse
 		// 领导人选举：MsgRequestVote
+		// 领导人转移：MsgTransferLeader
 		r.stepLeader(m)
 	}
 	return nil
@@ -432,6 +461,13 @@ func (r *Raft) stepFollower(m pb.Message) {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNowRequest(m)
 	}
 }
 func (r *Raft) stepCandidate(m pb.Message) {
@@ -448,6 +484,13 @@ func (r *Raft) stepCandidate(m pb.Message) {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNowRequest(m)
 	}
 
 }
@@ -467,18 +510,46 @@ func (r *Raft) stepLeader(m pb.Message) {
 		r.handleAppendEntriesResponse(m)
 	case pb.MessageType_MsgBeat:
 		r.bcastHeatbeat()
-
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
 }
 
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+		r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		// 如果是删除节点，由于有节点被移除了，这个时候可能有新的日志可以提交
+		// 这是必要的，因为 TinyKV 只有在 handleAppendRequestResponse 的时候才会判断是否有新的日志可以提交
+		// 如果节点被移除了，则可能会因为缺少这个节点的回复，导致可以提交的日志无法在当前任期被提交
+		if r.State == StateLeader && r.maybeCommit() {
+			log.Infof("[removeNode commit] %v leader commit new entry, commitIndex %v", r.id, r.RaftLog.committed)
+			r.bcastAppend()
+		}
+	}
+}
+
+func (r *Raft) maybeCommit() bool {
+	matchArray := make(uint64Slice, 0)
+	for _, progress := range r.Prs {
+		matchArray = append(matchArray, progress.Match)
+	}
+	// // 获取所有节点 match 的中位数，就是被大多数节点复制的日志索引
+	sort.Sort(sort.Reverse(matchArray))
+	majority := len(r.Prs)/2 + 1
+	toCommitIndex := matchArray[majority-1]
+	// 检查是否可以推进commitIndex
+	return r.RaftLog.maybeCommit(toCommitIndex, r.Term)
 }
 
 func (r *Raft) softState() *SoftState {
@@ -511,6 +582,9 @@ func (r *Raft) appendEntry(entries []*pb.Entry) {
 	for i := range entries {
 		entries[i].Index = lastIndex + uint64(i) + 1
 		entries[i].Term = r.Term
+		if entries[i].EntryType == pb.EntryType_EntryConfChange {
+			r.PendingConfIndex = entries[i].Index
+		}
 	}
 	r.RaftLog.appendNewEntrys(entries)
 }
@@ -545,4 +619,8 @@ func (r *Raft) bcastHeatbeat() {
 			r.sendHeartbeat(peerId)
 		}
 	}
+}
+
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{MsgType: pb.MessageType_MsgTimeoutNow, From: r.id, To: to})
 }

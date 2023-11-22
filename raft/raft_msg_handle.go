@@ -1,12 +1,18 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"sort"
 )
 
 // handlePropose leader 追加从上层应用接收到的新日志，并广播给 follower
 func (r *Raft) handlePropose(m pb.Message) {
+	// leader 处于领导者转移流程，停止接收新的请求
+	if r.leadTransferee != None {
+		return
+	}
+
 	// 追加到当前节点的日志中
 	r.appendEntry(m.Entries)
 
@@ -263,6 +269,13 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		r.Prs[m.From].Match = m.Index
 		r.leaderCommit()
 	}
+
+	// 3A: leadTransferee
+	if r.leadTransferee == m.From && r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		// AppendEntryResponse 回复来自 transferee，检查日志是否是最新的
+		// 如果 leadTransferee 达到了最新的日志则立即发起领导者转移（推进流程）
+		r.sendTimeoutNow(m.From)
+	}
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -296,4 +309,47 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		resp.Index = meta.Index
 	}
 	r.msgs = append(r.msgs, resp)
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	// 判断 transferee 是否在集群中
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	// transferee 就是 leader 自己，不需要转移
+	if m.From == r.id {
+		return
+	}
+	// 判断是否有转让流程正在进行，如果是相同节点的转让流程就返回，否则的话终止上一个转让流程
+	if r.leadTransferee != None {
+		if r.leadTransferee == m.From { // 上一个转让流程的 transferee 与本次转让流程的 transferee 相同，终止本次转让
+			return
+		}
+		// 否则终止上一次转让流程
+		r.leadTransferee = None
+	}
+
+	// 开启新一轮转让流程
+	r.leadTransferee = m.From // MsgTransferLeader的From就是transferee的id
+	r.transferElapsed = 0
+
+	// transferee 资格验证
+	if r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		// 满足资格，直接转让
+		r.sendTimeoutNow(m.From)
+	} else {
+		// 不满足，帮助transferee
+		r.sendAppend(m.From)
+	}
+}
+
+func (r *Raft) handleTimeoutNowRequest(m pb.Message) {
+	if _, ok := r.Prs[r.id]; !ok {
+		return
+	}
+
+	// 直接发起选举
+	if err := r.Step(pb.Message{MsgType: pb.MessageType_MsgHup}); err != nil {
+		log.Panic(err)
+	}
 }

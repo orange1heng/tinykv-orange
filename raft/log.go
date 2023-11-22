@@ -259,3 +259,16 @@ func (l *RaftLog) toSliceIndex(i uint64) int {
 	}
 	return idx
 }
+
+// maybeCommit 检查一个被大多数节点复制的日志是否需要提交
+func (l *RaftLog) maybeCommit(toCommit, term uint64) bool {
+	commitTerm, _ := l.Term(toCommit)
+	if toCommit > l.committed && commitTerm == term {
+		// 只有当该日志被大多数节点复制（函数调用保证），并且日志索引大于当前的commitIndex（Condition 1）
+		// 并且该日志是当前任期内创建的日志（Condition 2），才可以提交这条日志
+		// 【注】为了一致性，Raft 永远不会通过计算副本的方式提交之前任期的日志，只能通过提交当前任期的日志一并提交之前所有的日志
+		l.commitTo(toCommit)
+		return true
+	}
+	return false
+}
