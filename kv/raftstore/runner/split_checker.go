@@ -80,6 +80,7 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 	for it.Seek(startKey); it.Valid(); it.Next() {
 		item := it.Item()
 		key := item.Key()
+		// 更新区域大小
 		if engine_util.ExceedEndKey(key, endKey) {
 			// update region size
 			r.router.Send(regionID, message.Msg{
@@ -88,6 +89,7 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 			})
 			break
 		}
+		// 检查是否到达分裂条件，如果到达分裂条件就将这个key作为split key
 		if r.checker.onKv(key, item) {
 			break
 		}

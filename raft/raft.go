@@ -520,8 +520,8 @@ func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; !ok {
 		r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
-		r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
 	}
+	r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
 }
 
 // removeNode remove a node from raft group
@@ -537,6 +537,7 @@ func (r *Raft) removeNode(id uint64) {
 			r.bcastAppend()
 		}
 	}
+	r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
 }
 
 func (r *Raft) maybeCommit() bool {

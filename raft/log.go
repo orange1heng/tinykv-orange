@@ -179,9 +179,6 @@ func (l *RaftLog) LastTerm() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if i == 0 { // dummy entry's index is 1.
-		return 0, nil
-	}
 	if i > l.LastIndex() {
 		return 0, ErrUnavailable
 	}
